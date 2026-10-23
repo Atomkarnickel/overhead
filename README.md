@@ -7,9 +7,19 @@ Alles kostenlos, ohne Konto, ohne API-Schlüssel.
 ## APK herunterladen
 
 <!-- APK-DOWNLOADS:START -->
-Noch kein stabiles Release mit APK veröffentlicht. Sobald ein Release existiert, steht hier automatisch der direkte Downloadlink.
+**Neueste stabile Version: 1.0.0** (23.10.2026)
 
-Alle Releases: <https://github.com/Atomkarnickel/overhead/releases>
+➡️ **[overhead-1.0.0.apk herunterladen](https://github.com/Atomkarnickel/overhead/releases/download/v1.0.0/overhead-1.0.0.apk)** · [SHA-256](https://github.com/Atomkarnickel/overhead/releases/download/v1.0.0/overhead-1.0.0.apk.sha256)
+
+Immer aktuelle Release-Seite: <https://github.com/Atomkarnickel/overhead/releases/latest>
+
+### Die fünf neuesten stabilen Releases
+
+| Version | Veröffentlicht | Download | Änderungen |
+|---|---|---|---|
+| [1.0.0](https://github.com/Atomkarnickel/overhead/releases/tag/v1.0.0) | 23.10.2026 | [overhead-1.0.0.apk](https://github.com/Atomkarnickel/overhead/releases/download/v1.0.0/overhead-1.0.0.apk) | Erste Version: Homescreen-Widget mit Mini-Radar, Live-Liste und Karte der Flugzeuge über dir. |
+
+_Dieser Abschnitt wird nach jedem Release automatisch erzeugt (scripts/update_readme.py)._
 <!-- APK-DOWNLOADS:END -->
 
 **Installation:** APK auf dem Handy öffnen → ggf. „Unbekannte Apps installieren“ für Browser/Dateimanager erlauben → installieren. Updates installieren sich über die alte Version (alle APKs sind mit demselben Schlüssel signiert), Einstellungen bleiben erhalten. Android 8.0 oder neuer.
