@@ -1,0 +1,26 @@
+# Build
+build/
+.gradle/
+.kotlin/
+local.properties
+*.apk
+*.aab
+dist/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# Signierung – niemals committen
+*.jks
+*.keystore
+signing.env
+.env
+
+# Python
+__pycache__/
+.venv/

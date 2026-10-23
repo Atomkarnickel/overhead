@@ -1,0 +1,177 @@
+name: Release
+
+# Auslöser: Push eines Tags vX.Y.Z. Ergebnis: signierte APK + SHA-256 als GitHub Release, README-Downloadliste aktualisiert.
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Tag, Version und Changelog prüfen
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: v
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if ! [[ "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Tag '$TAG' ist kein stabiles SemVer-Tag (vX.Y.Z)."; exit 1
+          fi
+          VERSION="${TAG#v}"
+          FILE_VERSION="$(tr -d '[:space:]' < VERSION)"
+          if [ "$VERSION" != "$FILE_VERSION" ]; then
+            echo "::error::Tag $TAG passt nicht zur Datei VERSION ($FILE_VERSION). Erst VERSION erhöhen, committen, dann taggen."; exit 1
+          fi
+          if ! python3 scripts/changelog.py "$VERSION" > /dev/null; then
+            echo "::error::CHANGELOG.md enthält keinen Abschnitt für $VERSION."; exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  android:
+    name: Testen, bauen, signieren, veröffentlichen
+    needs: prepare
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      APK_NAME: overhead-${{ needs.prepare.outputs.version }}.apk
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Signier-Secrets vorhanden?
+        env:
+          KS: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KSP: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KA: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KP: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          CERT: ${{ vars.ANDROID_CERT_SHA256 }}
+        run: |
+          missing=""
+          [ -z "$KS" ] && missing="$missing ANDROID_KEYSTORE_BASE64"
+          [ -z "$KSP" ] && missing="$missing ANDROID_KEYSTORE_PASSWORD"
+          [ -z "$KA" ] && missing="$missing ANDROID_KEY_ALIAS"
+          [ -z "$KP" ] && missing="$missing ANDROID_KEY_PASSWORD"
+          [ -z "$CERT" ] && missing="$missing (Variable) ANDROID_CERT_SHA256"
+          if [ -n "$missing" ]; then
+            echo "::error::Fehlende Secrets/Variablen:$missing – ohne sie wird kein offizielles Release erstellt."; exit 1
+          fi
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v6
+
+      - name: Skript-Tests
+        run: python3 -m unittest discover -s scripts/tests
+
+      - name: Keystore bereitstellen
+        env:
+          KS: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          echo "$KS" | base64 -d > "$RUNNER_TEMP/release.jks"
+          echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+
+      - name: Tests, Lint und signierter Release-Build
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon :app:testDebugUnitTest :app:lintDebug :app:assembleRelease
+
+      - name: Signatur, Zertifikat und Paketinformationen prüfen
+        env:
+          EXPECTED_CERT: ${{ vars.ANDROID_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          APK=app/build/outputs/apk/release/app-release.apk
+          BT="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)"
+          "$BT/apksigner" verify --verbose --print-certs "$APK" | tee "$RUNNER_TEMP/signature.txt"
+          ACTUAL=$(grep -m1 -E "Signer( #1|:) certificate SHA-256 digest" "$RUNNER_TEMP/signature.txt" | awk '{print $NF}')
+          EXPECTED=$(echo "$EXPECTED_CERT" | tr -d ': ' | tr 'A-F' 'a-f')
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::Signaturzertifikat ($ACTUAL) entspricht nicht dem erwarteten Release-Zertifikat. Updates wären nicht installierbar."; exit 1
+          fi
+          "$BT/aapt2" dump badging "$APK" | head -1 | tee "$RUNNER_TEMP/badging.txt"
+          CODE=$(python3 -c "v='$VERSION'.split('.'); print(int(v[0])*10000+int(v[1])*100+int(v[2]))")
+          grep -q "package: name='com.atomkarnickel.overhead'" "$RUNNER_TEMP/badging.txt"
+          grep -q "versionName='$VERSION'" "$RUNNER_TEMP/badging.txt"
+          grep -q "versionCode='$CODE'" "$RUNNER_TEMP/badging.txt"
+          mkdir -p dist
+          cp "$APK" "dist/$APK_NAME"
+          (cd dist && sha256sum "$APK_NAME" > "$APK_NAME.sha256" && sha256sum -c "$APK_NAME.sha256")
+
+      - name: GitHub Release erstellen (erst Entwurf, nach Prüfung veröffentlichen)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          SHA=$(cut -d' ' -f1 "dist/$APK_NAME.sha256")
+          CERT=$(grep -m1 -E "Signer( #1|:) certificate SHA-256 digest" "$RUNNER_TEMP/signature.txt" | awk '{print $NF}')
+          python3 scripts/changelog.py "$VERSION" > "$RUNNER_TEMP/notes.md"
+          cat >> "$RUNNER_TEMP/notes.md" <<EOF
+
+          ## Android-APK
+
+          | Datei | SHA-256 |
+          |---|---|
+          | \`$APK_NAME\` | \`$SHA\` |
+
+          Signaturzertifikat (SHA-256): \`$CERT\`
+
+          Installation: APK auf dem Android-Gerät öffnen und die Installation bestätigen (ggf. „Unbekannte Apps installieren“ erlauben). Danach lange auf den Startbildschirm drücken → Widgets → Overhead.
+          EOF
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "::error::Release $GITHUB_REF_NAME existiert bereits. Neues Patch-Release erstellen statt Assets zu überschreiben."; exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" --draft --verify-tag --notes-file "$RUNNER_TEMP/notes.md" --title "v$VERSION" \
+            "dist/$APK_NAME" "dist/$APK_NAME.sha256"
+          ASSETS=$(gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name' | sort | tr '\n' ' ')
+          [ "$ASSETS" = "$APK_NAME $APK_NAME.sha256 " ] || { echo "::error::Unerwartete Assets: $ASSETS"; exit 1; }
+          gh release edit "$GITHUB_REF_NAME" --draft=false --latest
+
+      - name: Veröffentlichten Download prüfen
+        run: |
+          set -euo pipefail
+          URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/${APK_NAME}"
+          for i in 1 2 3 4 5; do
+            if curl -fsSL -o "$RUNNER_TEMP/check.apk" "$URL"; then break; fi; sleep 10
+          done
+          echo "$(cut -d' ' -f1 dist/$APK_NAME.sha256)  $RUNNER_TEMP/check.apk" | sha256sum -c -
+
+  readme:
+    name: README-Downloadliste aktualisieren
+    needs: [prepare, android]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: README generieren (inkl. Linkprüfung)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python scripts/update_readme.py
+      - name: Commit
+        run: |
+          if git diff --quiet README.md; then echo "Keine Änderung"; exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "docs: README-Downloads für v${{ needs.prepare.outputs.version }} aktualisieren"
+          git push origin HEAD:main
